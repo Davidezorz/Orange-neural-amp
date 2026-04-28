@@ -6,11 +6,14 @@ from lightning_model import LightningModel
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 from preprocessing import *
-from utils import plotWaveforms, setupMatplotlib, numberOfparameters
+from utils import plotWaveforms, setupMatplotlib, numberOfparameters, getDevice
 from mamba2 import Mamba2
 from model import Model
 from data import AudioDataset
+from LSTM import SimpleAmpLSTM
 
+import warnings
+import logging
 
 if __name__ == "__main__":
     print('main run')
@@ -21,8 +24,9 @@ if __name__ == "__main__":
 
     y_clean, sampling_rate = load_audio(path_clean)
     y, sampling_rate       = load_audio(path_distort, sampling_rate, mono=True)
+    store_audio(path_distort[:-4] + "RESAMPLED.wav",  y*.97, sampling_rate)
 
-
+    raise Exception
     # audio_data = audio_data.mean(axis=0)
     print(y_clean.shape, sampling_rate)
 
@@ -71,10 +75,11 @@ if __name__ == "__main__":
 
 
     torch.manual_seed(0)
-    device = 'mps'
+    device = getDevice()
+    print(f"Using device: {device}\n")
 
     d_model     = 16
-    d_state     = 16
+    d_state     = 32
     chunk_size  = 16
     headdim     = 4
     ngroups     = 4
@@ -95,11 +100,13 @@ if __name__ == "__main__":
     """
 
     x = torch.rand(B, T, 1).to(device)
-    model = Model(H=d_model, N=d_state).to(device)
+    model = Model(H=d_model, N=d_state, D=8).to(device)
+    # model = SimpleAmpLSTM(hidden_size=d_state).to(device)
     
     print('Model with: ', numberOfparameters(model), " parameters")
     y = model(x)
-    print(y.shape)
+    print(y.shape) 
+   
 
 
     delay = gearAlignment.state.delay
@@ -114,9 +121,10 @@ if __name__ == "__main__":
 
 
     # 2. Instantiate Datasets & Dataloaders
-    chunk_size = 4096
-    warmup = 64    
-    max_epochs = 2
+    chunk_size = 2**14
+    warmup = 0   
+    max_epochs = 30
+    batch_size = 8
 
 
     train_dataset = AudioDataset(y_in_train, y_out_train, 
@@ -124,18 +132,20 @@ if __name__ == "__main__":
     val_dataset   = AudioDataset(y_in_val, y_out_val, 
                                  chunk_size=chunk_size)
 
-    train_loader = DataLoader(train_dataset, batch_size=16, 
-                              shuffle=True, num_workers=4)
-    val_loader   = DataLoader(val_dataset, batch_size=16, 
-                              shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, 
+                              shuffle=True, num_workers=4, 
+                              persistent_workers=True)
+    val_loader   = DataLoader(val_dataset, batch_size=batch_size, 
+                              shuffle=False, num_workers=4,
+                              persistent_workers=True)
 
-    print(f"len(train_loader): {len(train_loader)}")
+    print(f"len(train_loader): {len(train_loader)}") 
         
 
     
     lightning_model = LightningModel(
         model          = model,
-        learning_rate  = 1e-4,
+        learning_rate  = 8e-4,
         warmup         = warmup,
         lr_decay_steps = len(train_loader)*max_epochs 
     )
@@ -148,10 +158,10 @@ if __name__ == "__main__":
         mode='min',
     )
     
-    
+   
     trainer = pl.Trainer(
         max_epochs=max_epochs,
-        accelerator='auto',   # Automatically uses GPU if available
+        accelerator=device,   # Automatically uses GPU if available
         devices=1,
         callbacks=[checkpoint_callback],
         log_every_n_steps=10
@@ -159,15 +169,47 @@ if __name__ == "__main__":
     
     # 5. Train
     trainer.fit(lightning_model, train_loader, val_loader)
+
+
+    # 6. Train end
+    lightning_model.to(device)
+    lightning_model.eval()
     
     """
-    checkpoint_path = "checkpoints/mamba2-epoch=01-val_loss=8247262.0000.ckpt"
+    checkpoint_path = ".weights/mamba2-epoch=29-val_loss=0.6456.ckpt"
 
     lightning_model = LightningModel.load_from_checkpoint(
         checkpoint_path,
         model=model 
     )
+    
+
     """
+    """
+    losses = []
+    for i, (y_in, y_out) in enumerate(val_loader):
+        y_in, y_out = y_in.to(device), y_out.to(device)
+
+        y_pred = lightning_model.model(y_in)
+        loss = lightning_model.esr_loss(y_pred, y_out)
+        losses.append(loss.item())
+        if i == 5: 
+            for j , (y_in_b, y_out_b, y_pred_b) in enumerate(zip(y_in, y_out, y_pred)):
+                print(f"iteration {j} current loss: ", lightning_model.esr_loss(y_pred_b, y_out_b))
+                plotWaveforms(y_in   = (y_in_b[:, 0]).detach().cpu().numpy(), 
+                              y_true = (y_out_b[:, 0]).detach().cpu().numpy(), 
+                              y_pred = (y_pred_b[:, 0]).detach().cpu().numpy())
+                plt.show()
+
+    worst_batch = torch.argmax(torch.tensor(losses))
+    print()
+    print(f"worst batch {worst_batch}")
+    print(f"worst batch {torch.tensor(losses)[worst_batch]}")
+    print(f"val loss {sum(losses)/len(losses)}")
+    print()
+    """
+
+    
     for i, (y_in, y_out) in enumerate(val_loader):
         y_in, y_out = y_in.to(device), y_out.to(device)
         if i >= 5 : break
@@ -180,6 +222,7 @@ if __name__ == "__main__":
                       y_true = (y_out[0, :, 0]).detach().cpu().numpy(), 
                       y_pred = (y_pred[0, :, 0]).detach().cpu().numpy())
         plt.show()
+
 
     """
     plotWaveforms(y, 

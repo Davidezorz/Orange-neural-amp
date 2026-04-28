@@ -29,7 +29,7 @@ class LightningModel(pl.LightningModule):
         return self.model(x)                                                    # B T C
 
 
-    def esr_loss(self, preds, targets, eps=1e-7):
+    def esr_loss(self, preds, targets, eps=1e-5):
         """ Error-to-Signal Ratio (ESR) loss. """
 
         mse = torch.mean((preds - targets)**2)
@@ -80,7 +80,7 @@ class LightningModel(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, 
             start_factor=1.0,                       # Start at 100% of self.lr
-            end_factor=0.01,                        # Decay down to 1% of self.lr
+            end_factor=0.05,                        # Decay down to 5% of self.lr
             total_iters=self.lr_decay_steps         # Number of epochs over which to decay
         )
         
