@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from mamba2 import Mamba2
 from mambapy.pscan import pscan
 import math
-
+from mambapy.mamba import Mamba, MambaConfig
 
 
 class TanhApprox(nn.Module):
@@ -26,7 +26,7 @@ class Model(nn.Module):
 
         self.input_layer = nn.Linear(input_channels, self.H, bias=False)
 
-        blocks = [ModelBlock(N=self.N, H=self.H) for _ in range(D)]
+        blocks = [ModelBlock3(N=self.N, H=self.H) for _ in range(D)]
         self.blocks = nn.ModuleList(blocks)
 
         self.output_layer = nn.Linear(self.H, output_channels, bias=False)
@@ -149,3 +149,31 @@ class LRUBlock(nn.Module):
         y = y + self.D * u.transpose(-2, -1)                                                        # B L H 1
 
         return y.transpose(-2, -1)                                                                  # B L 1 H
+
+
+
+
+
+
+# --------------------------------------------------------------------------- #
+
+class ModelBlock3(nn.Module):
+    def __init__(self,
+                 N,
+                 H):
+        super().__init__()
+
+        
+        
+        conf = MambaConfig(d_model=H, n_layers=1, d_state=N, d_conv=16)
+        self.ssm = Mamba(conf)
+
+        self.nonlinear_block = nn.Sequential(TanhApprox(),
+                                             nn.Linear(H, H))
+
+    def forward(self, x):
+
+        y = self.ssm(x)
+        y = self.nonlinear_block(y)
+
+        return y + x

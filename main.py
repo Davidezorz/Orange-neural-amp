@@ -26,7 +26,7 @@ if __name__ == "__main__":
     y, sampling_rate       = load_audio(path_distort, sampling_rate, mono=True)
     store_audio(path_distort[:-4] + "RESAMPLED.wav",  y*.97, sampling_rate)
 
-    raise Exception
+   
     # audio_data = audio_data.mean(axis=0)
     print(y_clean.shape, sampling_rate)
 
@@ -78,8 +78,8 @@ if __name__ == "__main__":
     device = getDevice()
     print(f"Using device: {device}\n")
 
-    d_model     = 16
-    d_state     = 32
+    d_model     = 12
+    d_state     = 16
     chunk_size  = 16
     headdim     = 4
     ngroups     = 4
@@ -100,7 +100,7 @@ if __name__ == "__main__":
     """
 
     x = torch.rand(B, T, 1).to(device)
-    model = Model(H=d_model, N=d_state, D=8).to(device)
+    model = Model(H=d_model, N=d_state, D=4).to(device)
     # model = SimpleAmpLSTM(hidden_size=d_state).to(device)
     
     print('Model with: ', numberOfparameters(model), " parameters")
@@ -121,8 +121,8 @@ if __name__ == "__main__":
 
 
     # 2. Instantiate Datasets & Dataloaders
-    chunk_size = 2**14
-    warmup = 0   
+    chunk_size = 2**13
+    warmup = 512   
     max_epochs = 30
     batch_size = 8
 

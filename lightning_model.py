@@ -29,8 +29,13 @@ class LightningModel(pl.LightningModule):
         return self.model(x)                                                    # B T C
 
 
-    def esr_loss(self, preds, targets, eps=1e-5):
+    def esr_loss(self, preds, targets, eps=0):
         """ Error-to-Signal Ratio (ESR) loss. """
+
+        return torch.mean(
+        torch.mean(torch.square(preds - targets), dim=1)
+        / torch.mean(torch.square(targets), dim=1)
+    )
 
         mse = torch.mean((preds - targets)**2)
         energy = torch.mean(targets ** 2)
@@ -92,3 +97,8 @@ class LightningModel(pl.LightningModule):
                 "frequency": 1
             }
         }
+    
+
+
+
+    
