@@ -26,7 +26,7 @@ class Model(nn.Module):
 
         self.input_layer = nn.Linear(input_channels, self.H, bias=False)
 
-        blocks = [ModelBlock3(N=self.N, H=self.H) for _ in range(D)]
+        blocks = [ModelBlockLRU(N=self.N, H=self.H) for _ in range(D)]
         self.blocks = nn.ModuleList(blocks)
 
         self.output_layer = nn.Linear(self.H, output_channels, bias=False)
@@ -72,33 +72,59 @@ class ModelBlock(nn.Module):
 
 
 
+
 # --------------------------------------------------------------------------- #
 
 
+class ModelBlock3(nn.Module):
+    def __init__(self,
+                 N,
+                 H):
+        super().__init__()
+
+        
+        
+        conf = MambaConfig(d_model=H, n_layers=1, d_state=N, d_conv=16)
+        self.ssm = Mamba(conf)
+
+        self.nonlinear_block = nn.Sequential(TanhApprox(),
+                                             nn.Linear(H, H))
+
+    def forward(self, x):
+
+        y = self.ssm(x)
+        y = self.nonlinear_block(y)
+
+        return y + x
 
 
-class ModelBlock2(nn.Module):
+
+# --------------------------------------------------------------------------- #
+
+
+class ModelBlockLRU(nn.Module):
     def __init__(  self, N, H):
         super().__init__()
         """
         self.lru = LRUBlock(  N=N, H=H)
         """
 
-        self.lru = LRUBlock(N=N, H=H)
+        self.lru = MyLRUBlock(N=N, H=H)
 
-        self.nonlinear_block = nn.Sequential(  TanhApprox()
-                                             , nn.Linear(H, H))
+        self.nonlinear_block = nn.Sequential(TanhApprox(),
+                                             nn.Linear(H, H))
 
     def forward(self, x):
 
-        y = self.lru(x.unsqueeze(-2)).squeeze(-2)
-        #y = self.lru(x)
+        y = self.lru(x)
         y = self.nonlinear_block(y)
 
         return y + x
 
 
-# ----------------------- #
+
+# --------------------------------------------------------------------------- #
+
 
 class LRUBlock(nn.Module):
     def __init__(self, N, H):
@@ -126,13 +152,17 @@ class LRUBlock(nn.Module):
         # D
         self.D = nn.Parameter(torch.randn(1, 1, H, 1)) 
 
+
     def scan(self, A, x):
         Ax = pscan(A, x)
         out = torch.zeros_like(Ax)
         out[:, 1:, ...] = Ax[:, :-1, ...]
         return out
 
+
     def forward(self, u):
+        u = u.unsqueeze(-2)
+
         B, L, one, H = u.shape
 
         A = torch.exp(-torch.exp(self.nu_log))                                                      # 1 1 1 N
@@ -148,32 +178,71 @@ class LRUBlock(nn.Module):
         y = torch.matmul(self.C, x)                                                                 # B L H 1
         y = y + self.D * u.transpose(-2, -1)                                                        # B L H 1
 
-        return y.transpose(-2, -1)                                                                  # B L 1 H
-
-
+        return y.transpose(-2, -1).squeeze(-2)                                                                 # B L 1 H
 
 
 
 
 # --------------------------------------------------------------------------- #
 
-class ModelBlock3(nn.Module):
-    def __init__(self,
-                 N,
-                 H):
+
+class MyLRUBlock(nn.Module):
+    def __init__(self, N, H):
         super().__init__()
+        self.N, self.H = N, H
 
+        r_min = 0.8
+        r_max = 1.0
+
+        # Nu log
+        u = torch.rand(1, 1, 1, N)
+        self.nu_log = nn.Parameter(torch.log(-0.5 * torch.log(u * (r_max**2 - r_min**2) + r_min**2)))
+        self.nu_log._no_weight_decay = True
+
+        # Gamma log
+        A = torch.exp(-torch.exp(self.nu_log))
+        self.gamma_log = nn.Parameter(torch.log(torch.sqrt(torch.ones(A.shape) - torch.abs(A) ** 2)))
+
+        # B
+        self.B = nn.Parameter(torch.randn(1, 1, N, H) / math.sqrt(2.0 * H))
+        self.B._no_weight_decay = True
+
+        # C
+        self.C = nn.Parameter(torch.randn(1, 1, H, N) / math.sqrt(N))
+
+        # D
+        self.D = nn.Parameter(torch.randn(1, 1, H, 1)) 
+
+        self.u_proj1 = nn.Linear(H, N)
+        #self.u_proj2 = nn.Linear(H, N)
+
+
+    def scan(self, A, x):
+        Ax = pscan(A, x)
+        out = torch.zeros_like(Ax)
+        out[:, 1:, ...] = Ax[:, :-1, ...]
+        return out
+
+
+    def forward(self, u):
+        B, L, H = u.shape
+
+        u_proj1 = self.u_proj1(u)[:, :, :, None]
+        #u_proj2 = self.u_proj2(u)[:, :, None, :]
+
+        u = u.unsqueeze(-2)
+        A = torch.exp(-torch.exp(self.nu_log))                                              # B L 1 N
+       
+        # Expand A across batch/time dims
+        A_expanded = A.expand(B, L, -1, -1)                                                 # B L 1 N
+        B_app = self.B*u_proj1
         
-        
-        conf = MambaConfig(d_model=H, n_layers=1, d_state=N, d_conv=16)
-        self.ssm = Mamba(conf)
+        # Ax + Bu
+        Bu = torch.exp(self.gamma_log) * (B_app @ u.transpose(-2, -1)).transpose(-2, -1)     # B L 1 N
+        x  = self.scan(A_expanded, Bu).transpose(-2, -1)                                     # B L N 1
 
-        self.nonlinear_block = nn.Sequential(TanhApprox(),
-                                             nn.Linear(H, H))
+        # Cx + Du
+        y = (self.C) @ x                                                                       # B L H 1
+        y = y + self.D * u.transpose(-2, -1)                                                 # B L H 1
 
-    def forward(self, x):
-
-        y = self.ssm(x)
-        y = self.nonlinear_block(y)
-
-        return y + x
+        return y.transpose(-2, -1).squeeze(-2)

@@ -29,18 +29,18 @@ class LightningModel(pl.LightningModule):
         return self.model(x)                                                    # B T C
 
 
-    def esr_loss(self, preds, targets, eps=0):
+    def esr_loss(self, preds, targets, eps=1e-12):
         """ Error-to-Signal Ratio (ESR) loss. """
-
-        return torch.mean(
-        torch.mean(torch.square(preds - targets), dim=1)
-        / torch.mean(torch.square(targets), dim=1)
-    )
 
         mse = torch.mean((preds - targets)**2)
         energy = torch.mean(targets ** 2)
         return mse / (energy + eps)
 
+
+    def weak_esr_loss(self, preds, targets, coef=0.01):
+        mse = torch.mean((preds - targets)**2)
+        energy = torch.mean(targets ** 2)
+        return mse / (coef + (1-coef)*energy )   
 
 
     def shared_step(self, batch, batch_idx):
@@ -49,19 +49,23 @@ class LightningModel(pl.LightningModule):
 
         y_pred = self(y_input)[:, -T:, :]                                       # Prediction and receptive field alignment
 
-        loss = self.esr_loss(y_pred  [:, self.warmup:, :], 
-                             y_output[:, self.warmup:, :])
-        return loss
+        esr_loss = self.esr_loss(y_pred  [:, self.warmup:, :], 
+                                 y_output[:, self.warmup:, :])
+        
+        weak_esr_loss = self.weak_esr_loss(y_pred  [:, self.warmup:, :], 
+                                           y_output[:, self.warmup:, :])
+        return esr_loss, weak_esr_loss
 
 
     def training_step(self, batch, batch_idx):
-        loss = self.shared_step(batch, batch_idx)
+        esr_loss, weak_esr_loss = self.shared_step(batch, batch_idx)
+        loss = 0.1*weak_esr_loss + 0.9*esr_loss
+
+        # Logs
+        self.log('train_esr', esr_loss, prog_bar=True, on_step=True, 
+                 on_epoch=True)
         self.log('train_loss', loss, prog_bar=True, on_step=True, 
                  on_epoch=True)
-        
-
-        # Log both to the progress bar simultaneously
-        self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         opt = self.optimizers()
         current_lr = opt.param_groups[0]['lr']
         self.log('lr', current_lr, prog_bar=True, on_step=True, on_epoch=False)
@@ -69,9 +73,10 @@ class LightningModel(pl.LightningModule):
 
 
     def validation_step(self, batch, batch_idx):
-        loss = self.shared_step(batch, batch_idx)
-        self.log('val_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
-        return loss
+        esr_loss, weak_esr_loss = self.shared_step(batch, batch_idx)
+        self.log('val_esr', esr_loss, prog_bar=True, on_step=False, 
+                 on_epoch=True)
+        return esr_loss
 
 
     def configure_optimizers(self):

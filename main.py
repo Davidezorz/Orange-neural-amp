@@ -130,18 +130,24 @@ if __name__ == "__main__":
     train_dataset = AudioDataset(y_in_train, y_out_train, 
                                  chunk_size=chunk_size)
     val_dataset   = AudioDataset(y_in_val, y_out_val, 
-                                 chunk_size=chunk_size)
+                                 chunk_size=y_out_val.shape[-1])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, 
                               shuffle=True, num_workers=4, 
                               persistent_workers=True)
-    val_loader   = DataLoader(val_dataset, batch_size=batch_size, 
+    val_loader  = DataLoader(val_dataset, batch_size=1, 
                               shuffle=False, num_workers=4,
                               persistent_workers=True)
 
     print(f"len(train_loader): {len(train_loader)}") 
-        
+    print(f"len(val_loader):   {len(val_loader)}") 
 
+
+    for y_in, y_out in val_loader:
+        print(y_in.shape)
+    
+
+    
     
     lightning_model = LightningModel(
         model          = model,
@@ -151,7 +157,7 @@ if __name__ == "__main__":
     )
     # 4. Setup Callbacks and Trainer
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_loss',
+        monitor='val_esr',
         dirpath='.weights/',
         filename='mamba2-{epoch:02d}-{val_loss:.4f}',
         save_top_k=3,
