@@ -78,8 +78,8 @@ if __name__ == "__main__":
     device = getDevice()
     print(f"Using device: {device}\n")
 
-    d_model     = 12
-    d_state     = 16
+    d_model     = 26
+    d_state     = 32
     chunk_size  = 16
     headdim     = 4
     ngroups     = 4
@@ -100,7 +100,7 @@ if __name__ == "__main__":
     """
 
     x = torch.rand(B, T, 1).to(device)
-    model = Model(H=d_model, N=d_state, D=4).to(device)
+    model = Model(H=d_model, N=d_state, D=7).to(device)
     # model = SimpleAmpLSTM(hidden_size=d_state).to(device)
     
     print('Model with: ', numberOfparameters(model), " parameters")
@@ -128,7 +128,7 @@ if __name__ == "__main__":
 
 
     train_dataset = AudioDataset(y_in_train, y_out_train, 
-                                 chunk_size=chunk_size)
+                                 chunk_size=chunk_size, stride=chunk_size//2)
     val_dataset   = AudioDataset(y_in_val, y_out_val, 
                                  chunk_size=y_out_val.shape[-1])
 

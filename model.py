@@ -187,9 +187,16 @@ class LRUBlock(nn.Module):
 
 
 class MyLRUBlock(nn.Module):
-    def __init__(self, N, H):
+    def __init__(self, N, H, kernel_size=16):
         super().__init__()
         self.N, self.H = N, H
+
+
+        self.conv1d = nn.Conv1d(in_channels=H+N, out_channels=H+N, 
+                              kernel_size=kernel_size, bias=True, 
+                              groups=H+N,
+                              padding=kernel_size - 1)
+        self.act = nn.SiLU()
 
         r_min = 0.8
         r_max = 1.0
@@ -213,8 +220,7 @@ class MyLRUBlock(nn.Module):
         # D
         self.D = nn.Parameter(torch.randn(1, 1, H, 1)) 
 
-        self.u_proj1 = nn.Linear(H, N)
-        #self.u_proj2 = nn.Linear(H, N)
+        self.u_proj1 = nn.Linear(H, H+N)
 
 
     def scan(self, A, x):
@@ -227,22 +233,30 @@ class MyLRUBlock(nn.Module):
     def forward(self, u):
         B, L, H = u.shape
 
-        u_proj1 = self.u_proj1(u)[:, :, :, None]
-        #u_proj2 = self.u_proj2(u)[:, :, None, :]
+        uB = self.u_proj1(u)
+
+        # 1D Convolution
+        uB = self.act(
+            self.conv1d(uB.transpose(1, 2)).transpose(1, 2)
+        )  # (B L H+N)
+        uB = uB[:, :L, :]
+
+        u, u_proj = torch.split(uB, [self.H, self.N], dim=-1)
+        u_proj = u_proj[:, :, :, None]
 
         u = u.unsqueeze(-2)
         A = torch.exp(-torch.exp(self.nu_log))                                              # B L 1 N
        
         # Expand A across batch/time dims
         A_expanded = A.expand(B, L, -1, -1)                                                 # B L 1 N
-        B_app = self.B*u_proj1
+        B_app = self.B*u_proj
         
         # Ax + Bu
         Bu = torch.exp(self.gamma_log) * (B_app @ u.transpose(-2, -1)).transpose(-2, -1)     # B L 1 N
         x  = self.scan(A_expanded, Bu).transpose(-2, -1)                                     # B L N 1
 
         # Cx + Du
-        y = (self.C) @ x                                                                       # B L H 1
+        y = (self.C) @ x                                                                     # B L H 1
         y = y + self.D * u.transpose(-2, -1)                                                 # B L H 1
 
         return y.transpose(-2, -1).squeeze(-2)
