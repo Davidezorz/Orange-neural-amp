@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 
+import losses
+
 
 
 class LightningModel(pl.LightningModule):
@@ -24,41 +26,38 @@ class LightningModel(pl.LightningModule):
         
         self.model = model
 
+        self.esr_loss       = losses.ESRLoss()
+        self.weak_esr_loss  = losses.WeakESRLoss()
+        self.mse_loss       = losses.MSELoss()
+        self.MRSTFTLoss     = losses.MultiResolutionSTFTLoss()
 
     def forward(self, x):
         return self.model(x)                                                    # B T C
 
 
-    def esr_loss(self, preds, targets, eps=1e-12):
-        """ Error-to-Signal Ratio (ESR) loss. """
-
-        mse = torch.mean((preds - targets)**2)
-        energy = torch.mean(targets ** 2)
-        return mse / (energy + eps)
-
-
-    def weak_esr_loss(self, preds, targets, coef=0.01):
-        mse = torch.mean((preds - targets)**2)
-        energy = torch.mean(targets ** 2)
-        return mse / (coef + (1-coef)*energy )   
-
-
     def shared_step(self, batch, batch_idx):
         y_input, y_output = batch
-        B, T, C = y_output.shape
+        B, L, C = y_output.shape
 
-        y_pred = self(y_input)[:, -T:, :]                                       # Prediction and receptive field alignment
+        y_pred = self(y_input)[:, -L:, :]                                       # Prediction and receptive field alignment
 
         esr_loss = self.esr_loss(y_pred  [:, self.warmup:, :], 
                                  y_output[:, self.warmup:, :])
         
         weak_esr_loss = self.weak_esr_loss(y_pred  [:, self.warmup:, :], 
                                            y_output[:, self.warmup:, :])
-        return esr_loss, weak_esr_loss
+        
+        print()
+        print(y_pred.transpose(-1, -2).contiguous().shape)
+        print(y_output.transpose(-1, -2).contiguous().shape)
+        print()
+        mrSTFTLoss = self.MRSTFTLoss(y_pred.transpose(-1, -2).contiguous(), 
+                                     y_output.transpose(-1, -2).contiguous())
+        return esr_loss, weak_esr_loss, mrSTFTLoss
 
 
     def training_step(self, batch, batch_idx):
-        esr_loss, weak_esr_loss = self.shared_step(batch, batch_idx)
+        esr_loss, weak_esr_loss, mrSTFTLoss = self.shared_step(batch, batch_idx)
         loss = 0.1*weak_esr_loss + 0.9*esr_loss
 
         # Logs
@@ -73,7 +72,7 @@ class LightningModel(pl.LightningModule):
 
 
     def validation_step(self, batch, batch_idx):
-        esr_loss, weak_esr_loss = self.shared_step(batch, batch_idx)
+        esr_loss, weak_esr_loss, mrSTFTLoss = self.shared_step(batch, batch_idx)
         self.log('val_esr', esr_loss, prog_bar=True, on_step=False, 
                  on_epoch=True)
         return esr_loss

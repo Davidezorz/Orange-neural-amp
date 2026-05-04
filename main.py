@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # plotWaveforms(y_clean[503_990:504_050], y[503_990:504_050])
     preprocessing = Preprocessing(lookahead=5000)
     gearAlignment = CapturePair(_V3_DATA_INFO, path_distort, path_clean,
-                                  input_mono=True, output_mono=False)
+                                  input_mono=True, output_mono=True)
 
     print(gearAlignment.input_file.path)
 
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     train_dataset = AudioDataset(y_in_train, y_out_train, 
                                  chunk_size=chunk_size, stride=chunk_size//2)
     val_dataset   = AudioDataset(y_in_val, y_out_val, 
-                                 chunk_size=y_out_val.shape[-1])
+                                 chunk_size=y_out_val.shape[-1]) # len(x) - nx + 1
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, 
                               shuffle=True, num_workers=4, 
