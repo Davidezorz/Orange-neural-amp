@@ -18,7 +18,7 @@ from typing import TypedDict, Optional, Tuple
 def store_audio(path: str | Path, 
                 audio_data: np.ndarray, 
                 sample_rate: int = 44100) -> None:
-    soundfile.write(str(path), audio_data, sample_rate)
+    soundfile.write(str(path), audio_data, sample_rate, subtype='PCM_24')
 
 
 

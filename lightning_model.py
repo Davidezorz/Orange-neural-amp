@@ -31,6 +31,9 @@ class LightningModel(pl.LightningModule):
         self.mse_loss       = losses.MSELoss()
         self.MRSTFTLoss     = losses.MultiResolutionSTFTLoss()
 
+        self.need_stop = 0
+
+
     def forward(self, x):
         return self.model(x)                                                    # B T C
 
@@ -41,23 +44,36 @@ class LightningModel(pl.LightningModule):
 
         y_pred = self(y_input)[:, -L:, :]                                       # Prediction and receptive field alignment
 
+        #if torch.isnan(y_pred).any():
+        #    print(f"!!! FORWARD SIGNAL EXPLODED AT BATCH {batch_idx} !!!")
+
+        mse = self.mse_loss(y_pred  [:, self.warmup:, :], 
+                                 y_output[:, self.warmup:, :])
+        
         esr_loss = self.esr_loss(y_pred  [:, self.warmup:, :], 
                                  y_output[:, self.warmup:, :])
         
         weak_esr_loss = self.weak_esr_loss(y_pred  [:, self.warmup:, :], 
                                            y_output[:, self.warmup:, :])
         
-        print()
-        print(y_pred.transpose(-1, -2).contiguous().shape)
-        print(y_output.transpose(-1, -2).contiguous().shape)
-        print()
+        #print()
+        #print(y_pred.transpose(-1, -2).contiguous().shape)
+        #print(y_output.transpose(-1, -2).contiguous().shape)
+        #print()
         mrSTFTLoss = self.MRSTFTLoss(y_pred.transpose(-1, -2).contiguous(), 
                                      y_output.transpose(-1, -2).contiguous())
-        return esr_loss, weak_esr_loss, mrSTFTLoss
+        
+        return esr_loss, weak_esr_loss, mrSTFTLoss, mse
 
 
     def training_step(self, batch, batch_idx):
-        esr_loss, weak_esr_loss, mrSTFTLoss = self.shared_step(batch, batch_idx)
+        # print()
+        # print("--"*40)
+        # print(f"=== BATCH IDX: {batch_idx}")
+        #if self.need_stop > 5:
+        # if batch_idx > 1: raise Exception
+        losses = self.shared_step(batch, batch_idx)
+        esr_loss, weak_esr_loss, mrSTFTLoss, mse_loss = losses
         loss = 0.1*weak_esr_loss + 0.9*esr_loss
 
         # Logs
@@ -69,11 +85,49 @@ class LightningModel(pl.LightningModule):
         current_lr = opt.param_groups[0]['lr']
         self.log('lr', current_lr, prog_bar=True, on_step=True, on_epoch=False)
         return loss
+    
+
+    def on_before_optimizer_step(self, optimizer):
+        return
+        # Loop through every BiquadsBlock in your model
+        for i, block in enumerate(self.model.blocks):
+            
+            # Group the coefficients together so we can loop through them easily
+            coeffs = {
+                'b_0': block.b_0, 'b_1': block.b_1, 'b_2': block.b_2,
+                'a_1': block.a_1, 'a_2': block.a_2, 'Hw': block.Hw
+            }
+            #print(f"BLOCK {i}")
+            #print(f"block.dn:      {block.denominator}")
+            #print(f"block.dn.grad: {block.denominator.grad}")
+
+            for name, tensor in coeffs.items():
+                # Make sure the tensor and its gradient actually exist
+                if tensor is not None and tensor.grad is not None:
+                    
+                    # Find the largest absolute gradient value in the K=10 filters
+                    max_grad = torch.max(torch.abs(tensor.grad))
+
+                    self.log(f"grad/{i}{name}", max_grad, on_step=True, on_epoch=False)
+                    if max_grad > 500 or torch.isnan(max_grad): 
+                        # print("\n\n")
+                        # print(f"i: {i}")
+                        # print(f"maxgrad: {max_grad}")
+                        # print("argmax: ", torch.argmax(torch.abs(tensor.grad)))
+                        # print(f"{name}: {tensor}")
+                        # print(f"{name} grad: {tensor.grad}")
+                        # print(f" block.db_gain: {block.db_gain} \n block.f_raw: {block.f_raw} \n block.Q_raw: {block.Q_raw}")
+                        # print(f"grads: \n block.db_gain: {block.db_gain.grad} \n block.f_raw: {block.f_raw.grad} \n block.Q_raw: {block.Q_raw.grad}")
+
+                        self.need_stop = self.need_stop + 1
 
 
     def validation_step(self, batch, batch_idx):
-        esr_loss, weak_esr_loss, mrSTFTLoss = self.shared_step(batch, batch_idx)
+        losses = self.shared_step(batch, batch_idx)
+        esr_loss, weak_esr_loss, mrSTFTLoss, mse_loss = losses
         self.log('val_esr', esr_loss, prog_bar=True, on_step=False, 
+                 on_epoch=True)
+        self.log('val_mse', mse_loss, prog_bar=True, on_step=False, 
                  on_epoch=True)
         return esr_loss
 

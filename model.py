@@ -11,7 +11,7 @@ class TanhApprox(nn.Module):
     def forward(self, x):
         return x / torch.sqrt(1 + x**2)
 
-
+    
 class Model(nn.Module):
     def __init__(self,
                  input_channels=1,
