@@ -8,7 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mamba2 import Mamba2
-from mambapy.pscan import pscan
+# from mambapy.pscan import pscan
+from pscan import pscan
 import math
 
 
@@ -19,19 +20,51 @@ def str_arr(x):
     return res
 
 
+
+
+
+
 class TanhApprox(nn.Module):
     def forward(self, x):
         return x / torch.sqrt(1 + x**2)
 
-    
+
+
+
+
+
 class BiquadsModel(nn.Module):
-    def __init__(self, S, K, sampling_rate):
+    
+    def __init__(self, 
+                 S:             int, 
+                 K:             int, 
+                 sampling_rate: float, 
+                 train_mode:    str | None = None, 
+                 eval_mode:     str | None = None):
+        """
+        Neural audio processor composed of multiple cascaded biquad filter blocks
+        separated by nonlinearities. Each block contains a learnable cascade of
+        parametric biquad filters whose coefficients are optimized end-to-end.
+
+        The filtering backend can be selected independently for training and
+        evaluation (e.g. parallel scan, FFT, or sequential filtering).
+
+        Args:
+            - S             (int):    Number of cascaded processing blocks.
+            - K             (int):    Number of biquad filters in each block.
+            - sampling_rate (float):  Audio sampling rate in Hz.
+            - train_mode    (str):    Filtering implementation used during 
+                                      training ('ssm', 'fft', 'sfft', 'seq').
+            - eval_mode     (str):    Filtering implementation used during 
+                                      evaluation ('ssm', 'fft', 'sfft', 'seq').
+        """
         super().__init__()
-
-        # self.delay_layer = ParametricDelay()
-
         self.K = K
         self.S = S
+        self.train_mode = train_mode                                            # choose the training and
+        self.eval_mode  = eval_mode                                             # evaluation computation
+
+        # self.delay_layer = ParametricDelay()                                  # present in the paper but not so useful
 
         blocks = [BiquadsBlock(K=K, sampling_rate=sampling_rate) 
                   for _ in range(S)]
@@ -41,7 +74,17 @@ class BiquadsModel(nn.Module):
         self.tanh = nn.Tanh() #TanhApprox()
 
 
+    def setup_forward_mode(self):
+        for block in self.blocks:
+            if self.train_mode is not None: 
+                block.train_mode = self.train_mode
+            if self.eval_mode is not None: 
+                block.eval_mode = self.eval_mode
+        
+
     def forward(self, y):
+        self.setup_forward_mode()
+
         if y.ndim == 2:
             y = y[:, :, None]
 
@@ -54,19 +97,6 @@ class BiquadsModel(nn.Module):
                 y = self.tanh(y)
         # print("end")
         return y
-    
-
-
-    def forward_eval(self, y):
-        if y.ndim == 2:
-            y = y[:, :, None]
-
-        for i, block in enumerate(self.blocks):                                 # Iterate over model blocks. Each block
-            y = self.gains[i]*block.forward_eval(y)                                          # consists of filter + NL
-            if i != len(self.blocks)-1:
-                y = self.tanh_approx(y)
-
-        return y
 
 
 
@@ -75,34 +105,37 @@ class BiquadsModel(nn.Module):
 class ParametricDelay(nn.Module):
     def __init__(self):
         super().__init__()
-        # d controls the sub-sample shift (0.0 to 1.0)
-        self.d = nn.Parameter(torch.tensor(0.0))
-        # Optional global phase inversion / linear gain
-        self.gain = nn.Parameter(torch.tensor(1.0))
+        self.d    = nn.Parameter(torch.tensor(0.0))                             # d controls the sub-sample shift (0.0 to 1.0)
+        self.gain = nn.Parameter(torch.tensor(1.0))                             # Optional global phase inversion / linear gain
 
     def forward(self, x):
-        # 1. Constrain d to be strictly between 0 and 1
-        d = torch.sigmoid(self.d)
-        
-        # 2. Create a 1-sample delayed version of x
-        # x shape is (Batch, Length, Channels)
-        x_delayed = torch.cat([torch.zeros_like(x[:, :1, :]), x[:, :-1, :]], dim=1)
-        
-        # 3. Interpolate between the current sample and the delayed sample
-        # If d=0.4, it takes 60% of the current sample and 40% of the delayed one
-        y = (1.0 - d) * x + d * x_delayed
+        B, L, C = x.shape
+
+        d = torch.sigmoid(self.d)                                               # Constrain d to be strictly between 0 and 1
+        zero_pad = torch.zeros_like(B, 1, C)
+        x_delayed = torch.cat([zero_pad, x[:, :-1, :]], dim=1)                  # Create a 1-sample delayed version of x
+        y = (1.0 - d) * x + d * x_delayed                                       # Interpolate
         
         return self.gain * y
     
 
 
 
-# ------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 class BiquadsBlock(nn.Module):
 
-    def __init__(self, K, sampling_rate):
+    def __init__(self, K, sampling_rate, train_mode='ssm', eval_mode='ssm'):
         super().__init__()
+        self.modes = {'ssm':  self.forward_pscan,                               # use pscan for computing the biquads
+                      'fft:': self.forward_fft,                                 # use the fft on the whole sequence
+                      'sfft': self.forward_sfft,                                # use the sfft, the merge point will have artefacts
+                      'seq':  self.forward_sequential                           # use biquads in standard mode using a python for loop (slow)
+                      }
+        
+        self.train_mode = train_mode                                            # choose the training and
+        self.eval_mode  = eval_mode                                             # evaluation computation
+
         self.K = K
         self.sampling_rate = sampling_rate
 
@@ -131,9 +164,9 @@ class BiquadsBlock(nn.Module):
         # for gradient checks
         self.Hw  = None
         self.denominator = None
-    
 
-    def forward_train(self, x):
+    
+    def forward_fft(self, x):
         B, L, C = x.shape
         
         # 1. Pad the FFT to at least 2*L to prevent circular convolution (time aliasing)
@@ -171,7 +204,7 @@ class BiquadsBlock(nn.Module):
         return y
 
 
-    def forward_train_sfft(self, x):
+    def forward_sfft(self, x):
         B, L, C = x.shape
         n_fft = 4096*2
 
@@ -196,8 +229,6 @@ class BiquadsBlock(nn.Module):
         if self.training:
             self.Hw.retain_grad()
         
-        
-        
         # Multiply across the K cascaded filters
         H_cascade = torch.prod(Hw, dim=0)
         # H_cascade = torch.exp(torch.sum(torch.log(Hw + 1e-8), dim=0))
@@ -208,10 +239,10 @@ class BiquadsBlock(nn.Module):
         # 3. Apply filter in frequency domain
         x_processed = x_stft * H_cascade
 
-        if torch.isnan(x_stft).any():       print("x_stft           CREATED NaNs!")
-        if torch.isnan(Hw).any():           print("Hw               CREATED NaNs!")
-        if torch.isnan(H_cascade).any():    print("H_cascade        CREATED NaNs!")
-        if torch.isnan(x_processed).any():  print("x_processed      CREATED NaNs!")
+        # if torch.isnan(x_stft).any():       print("x_stft           CREATED NaNs!")
+        # if torch.isnan(Hw).any():           print("Hw               CREATED NaNs!")
+        # if torch.isnan(H_cascade).any():    print("H_cascade        CREATED NaNs!")
+        # if torch.isnan(x_processed).any():  print("x_processed      CREATED NaNs!")
 
         # 4. Inverse STFT
         # We must explicitly tell istft that center=True so it un-pads perfectly
@@ -228,13 +259,13 @@ class BiquadsBlock(nn.Module):
         return y
 
 
-    def forward_eval(self, x):
+    def forward_sequential(self, x):
         B, L, C = x.shape
     
         x = torch.cat([torch.zeros(B, 2, C, device=x.device), x], dim=1)
         
         for k in range(self.K):
-            y = torch.zeros_like(x) # Reset y for each new filter in the cascade
+            y = torch.zeros_like(x)                                             # Reset y for each new filter in the cascade
             for i in range(2, L+2):
                 b_0, b_1, b_2 = self.b_0[k], self.b_1[k], self.b_2[k]
                 a_1, a_2 =  self.a_1[k], self.a_2[k]
@@ -244,6 +275,67 @@ class BiquadsBlock(nn.Module):
             x = y.clone()
 
         return y[:, 2:, :]
+    
+
+    def forward_pscan(self, x):        
+        B, L, C = x.shape
+        y = x.clone()
+        
+        # 0. CAST TO DOUBLE PRECISION (float64)
+        # This prevents "Catastrophic Cancellation" when the roots get too close to 0
+        a1 = self.a_1.squeeze(-1).to(torch.cfloat)
+        a2 = self.a_2.squeeze(-1).to(torch.cfloat)
+        b0 = self.b_0.squeeze(-1).to(torch.cfloat)
+        b1 = self.b_1.squeeze(-1).to(torch.cfloat)
+        b2 = self.b_2.squeeze(-1).to(torch.cfloat)
+
+        # 1. CALCULATE BOTH EIGENVALUES (The Poles)
+        discriminant = a1**2 - 4*a2
+        
+        # We only need a microscopic epsilon now because float64 has 15 decimal places of precision
+        sqrt_D = torch.where(torch.abs(discriminant) < 1e-12, 
+                             torch.tensor(1e-12, dtype=torch.cfloat, device=x.device), 
+                             torch.sqrt(discriminant))
+        
+        lam1 = (-a1 + sqrt_D) / 2.0
+        lam2 = (-a1 - sqrt_D) / 2.0
+
+        # 2. CALCULATE BOTH RESIDUES
+        p1 = b1 - b0 * a1
+        p2 = b2 - b0 * a2
+        R1 = (p1 * lam1 + p2) / sqrt_D
+        R2 = (p1 * lam2 + p2) / (-sqrt_D)
+
+        # 3. PACK
+        # Stack them so we can process both poles in parallel inside the scan!
+        lam = torch.stack([lam1, lam2], dim=1).to(torch.cfloat) # Shape: (K, 2)
+        R   = torch.stack([R1, R2], dim=1).to(torch.cfloat)     # Shape: (K, 2)
+        b0  = b0.to(torch.cfloat)
+
+        # 4. CASCADE THE FILTERS VIA PARALLEL SCAN
+        for k in range(self.K):
+            # A_scan: (B, L, C, 2) -> Holds both poles
+            A_scan = lam[k].view(1, 1, 1, 2).expand(B, L, C, 2)
+            
+            # X_scan: (B, L, C, 2) -> Copy the input audio for both poles
+            X_scan = y.unsqueeze(-1).expand(B, L, C, 2).to(torch.cfloat)
+            
+            # Compute BOTH poles simultaneously! Output: (B, L, C, 2)
+            h = pscan(A_scan, X_scan) 
+            
+            # Shift the sequence to the right by 1 step
+            h_delayed = torch.cat([
+                torch.zeros(B, 1, C, 2, dtype=torch.cfloat, device=x.device), 
+                h[:, :-1, :, :]
+            ], dim=1)
+
+            # 5. RECONSTRUCT THE AUDIO
+            # Multiply each state by its residue, sum the 2 poles together, and take the real part
+            y_rem = (R[k].view(1, 1, 1, 2) * h_delayed).sum(dim=-1)
+
+            y = b0[k].real * y + y_rem.real
+
+        return y
     
 
     def calculate_transfer_function(self, b0, b1, b2, a1, a2, n_fft=4096):
@@ -310,7 +402,6 @@ class BiquadsBlock(nn.Module):
         # compute coefficients
         a_0 =  1 + alpha/A
 
-
         self.b_0 = (1 + alpha*A)      / a_0
         self.b_1 = -2*torch.cos(w_0)  / a_0
         self.b_2 = (1 - alpha*A)      / a_0
@@ -318,7 +409,7 @@ class BiquadsBlock(nn.Module):
         self.a_1 = -2*torch.cos(w_0)  / a_0
         self.a_2 = (1 - alpha/A)      / a_0
 
-        # 2. Could be safer
+        # Could be safer
         # self.a_1 = torch.clamp(self.a_1, min=(-0.99 - self.a_2), max=(self.a_2 + 0.99))
         # self.a_2 = torch.clamp(self.a_2, min=-0.99, max=0.99)
 
@@ -370,11 +461,9 @@ class BiquadsBlock(nn.Module):
         if x.ndim == 2:                                                         # x is B L C
             x = x[:, :, None]
 
-        return self.forward_train(x)
         if self.training:
-            return self.forward_train(x)
-        
+            return self.modes[self.train_mode](x)
         else:
-            return self.forward_eval(x)
-        
+            return self.modes[self.eval_mode](x)
+
 

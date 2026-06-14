@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 
 import pytorch_lightning as pl
 from lightning_model import LightningModel
+from lightning_model2 import LightningModel2
+
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 from preprocessing import *
@@ -14,7 +16,7 @@ from model import Model
 from data import AudioDataset
 from LSTM import SimpleAmpLSTM
 from BiquadsModel import BiquadsBlock, BiquadsModel
-
+from s4d import ModelS4D
 
 import warnings
 
@@ -158,11 +160,11 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
     device = getDevice()
-    device = 'cpu'
+    #device = 'cpu'
     print(f"Using device: {device}\n")
 
-    d_model     = 26
-    d_state     = 32
+    d_model     = 16
+    d_state     = 16
     chunk_size  = 16
     headdim     = 4
     ngroups     = 4
@@ -171,20 +173,19 @@ if __name__ == "__main__":
     B, T, d_model = 2, 128, d_model
 
     x = torch.rand(B, T, 1).to(device)
-    # model = Model(H=d_model, N=d_state, D=7).to(device)
+    # model = Model(H=d_model, N=d_state, D=5).to(device)
     # model = SimpleAmpLSTM(hidden_size=d_state).to(device)
     # model = BiquadsBlock(K=2, sampling_rate=_V3_DATA_INFO.rate).to(device); model.compute_coefficients()
-    model = BiquadsModel(S=20, K=20, sampling_rate=_V3_DATA_INFO.rate).to(device)
-    
+    model = BiquadsModel(S=10, K=12, sampling_rate=_V3_DATA_INFO.rate).to(device)
+    # model = Model(H=d_model, N=d_state, D=7, input_channels=2).to(device) 
+    # model = ModelS4D(N=12, H=12, D=4)
     
     print('Model with: ', numberOfparameters(model), " parameters")
     # y = model(x)
     # print(y.shape) 
-   
 
-
-
-
+    file = ".weights/BiquadsS8K4"
+    # model.load_state_dict(torch.load(file, weights_only=True))
 
 
    # ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- --
@@ -214,9 +215,12 @@ if __name__ == "__main__":
     # 2. Instantiate Datasets & Dataloaders
     chunk_size = 2**13
     warmup = 512   
-    max_epochs = 30*2
+    max_epochs = 12*2
     batch_size = 8
 
+    #print(y_in_val.shape)
+    #print(y_out_val.shape)
+    #y_in_val, y_out_val = y_in_val[:, :90000], y_out_val[:, :90000]
 
     train_dataset = AudioDataset(y_in_train, y_out_train, 
                                  chunk_size=chunk_size, stride=chunk_size//2)
@@ -240,7 +244,7 @@ if __name__ == "__main__":
 
     
     
-    lightning_model = LightningModel(
+    lightning_model = LightningModel(  # TODO: HERE should be LightningModel
         model          = model,
         learning_rate  = 8e-3,
         warmup         = warmup,
@@ -262,11 +266,13 @@ if __name__ == "__main__":
         devices=1,
         callbacks=[checkpoint_callback],
         log_every_n_steps=10, 
-        #gradient_clip_val=100.0
+        # gradient_clip_val=1.0 #TODO: remove it
     )
     
     # 5. Train
     trainer.fit(lightning_model, train_loader, val_loader)
+
+    # torch.save(model.state_dict(), ".weights/BiquadsS8K4")
 
 
     # 6. Train end
@@ -312,32 +318,34 @@ if __name__ == "__main__":
         y_in, y_out = y_in.to(device), y_out.to(device)
         if i >= 5 : break
 
-        y_pred = lightning_model.model(y_in)
+        y_pred = lightning_model.model(y_in.clone())
+
         print(lightning_model.esr_loss(y_pred, y_out))
 
-        
         plotWaveforms(y_in   = (y_in[0, :, 0]).detach().cpu().numpy(), 
-                      y_true = (y_out[0, :, 0]).detach().cpu().numpy(), 
+                      y_true = (y_out[0, :, 0]).detach().cpu().numpy(),
                       y_pred = (y_pred[0, :, 0]).detach().cpu().numpy())
         plt.show()
 
+    try:
+        print()
+        print(model.gains)
+        for i, block in enumerate(model.blocks): 
+            print()
+            print()
+            print(f"i: {i}")
+            print(f"Calculated b0: mean: {block.b_0.mean()} values:      {block.b_0}")
+            print(f"Calculated b1: mean: {block.b_1.mean()} values:      {block.b_1}")
+            print(f"Calculated b2: mean: {block.b_2.mean()} values:      {block.b_2}")
+            print(f"Calculated a1: mean: {block.a_1.mean()} values:      {block.a_1}")
+            print(f"Calculated a2: mean: {block.a_2.mean()} values:      {block.a_2}")
 
-    print()
-    print(model.gains)
-    for i, block in enumerate(model.blocks): 
-        print()
-        print()
-        print(f"i: {i}")
-        print(f"Calculated b0: mean: {block.b_0.mean()} values:      {block.b_0}")
-        print(f"Calculated b1: mean: {block.b_1.mean()} values:      {block.b_1}")
-        print(f"Calculated b2: mean: {block.b_2.mean()} values:      {block.b_2}")
-        print(f"Calculated a1: mean: {block.a_1.mean()} values:      {block.a_1}")
-        print(f"Calculated a2: mean: {block.a_2.mean()} values:      {block.a_2}")
-
-        print()
-        print(f"Calculated db_gain: mean: {block.db_gain.mean()}  values: {block.db_gain}")
-        print(f"Calculated f_raw:   mean: {block.f_raw.mean()}    values: {block.f_raw}")
-        print(f"Calculated Q_raw:   mean: {block.Q_raw.mean()}    values: {block.Q_raw}")
+            print()
+            print(f"Calculated db_gain: mean: {block.db_gain.mean()}  values: {block.db_gain}")
+            print(f"Calculated f_raw:   mean: {block.f_raw.mean()}    values: {block.f_raw}")
+            print(f"Calculated Q_raw:   mean: {block.Q_raw.mean()}    values: {block.Q_raw}")
+    except:
+        pass
     """
     plotWaveforms(y, 
                   start_at=blip_locations[0]-1000, 

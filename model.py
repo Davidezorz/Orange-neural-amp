@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mamba2 import Mamba2
-from mambapy.pscan import pscan
 import math
 from mambapy.mamba import Mamba, MambaConfig
+# from mambapy.pscan import pscan
+from pscan import pscan
 
+import sys
 
 class TanhApprox(nn.Module):
     def forward(self, x):
@@ -42,11 +44,57 @@ class Model(nn.Module):
             x = block(x)                                                        # consists of Mamba2 + NL w/skip.
 
         return self.output_layer(x)                                             # Map output back to original dimension
+    
+
+    def generate(self, x_input):
+        """
+        x_input: The raw audio input without the concatenated y_prev. 
+                 Shape: (B, L, input_channels)
+        """
+        B, L, _ = x_input.shape
+        device = x_input.device
+        
+        # Initialize empty states for every LRU block. Shape: (B, 1, 1, N)
+        states = [torch.zeros(B, 1, 1, self.N, device=device) for _ in self.blocks]
+        
+        # Initialize the previous output as zeros for the very first step
+        y_prev = torch.zeros(B, 1, 1, device=device)  # Assuming output_channels = 1
+        
+        outputs = []
+        
+        for t in range(L):
+            if t%1000 == 0:
+                sys.stdout.write(f"\rt: {t}/{L}")
+                sys.stdout.flush()
+                
+            # 1. Grab the current input sample: (B, 1, input_channels)
+            x_t = x_input[:, t:t+1, :]
+            
+            # 2. Concatenate the current input with the previous predicted output
+            # This mimics your `y_input = torch.cat([y_input, y_output_prev], dim=-1)`
+            combo_input = torch.cat([x_t, y_prev], dim=-1)
+            
+            # 3. Map to hidden dimension H
+            hidden = self.input_layer(combo_input)
+            
+            # 4. Pass through all blocks sequentially, updating states
+            for i, block in enumerate(self.blocks):
+                hidden, states[i] = block.step(hidden, states[i])
+                
+            # 5. Map back to output dimension
+            y_curr = self.output_layer(hidden)
+            
+            # 6. Store output and update y_prev for the next iteration
+            outputs.append(y_curr)
+            y_prev = y_curr
+            
+        # Concatenate all steps back into a single tensor (B, L, output_channels)
+        return torch.cat(outputs, dim=1)
 
 
 # ----------------------------------------------------------------------------- #
 
-class ModelBlock(nn.Module):
+class ModelBlockMamba2(nn.Module):
     def __init__(self,
                  N,
                  H):
@@ -105,14 +153,15 @@ class ModelBlock3(nn.Module):
 class ModelBlockLRU(nn.Module):
     def __init__(  self, N, H):
         super().__init__()
-        """
         self.lru = LRUBlock(  N=N, H=H)
         """
 
         self.lru = MyLRUBlock(N=N, H=H)
+        """
 
         self.nonlinear_block = nn.Sequential(TanhApprox(),
                                              nn.Linear(H, H))
+
 
     def forward(self, x):
 
@@ -121,6 +170,19 @@ class ModelBlockLRU(nn.Module):
 
         return y + x
 
+
+    def step(self, x_t, state_prev):
+        """
+        x_t: (B, 1, H)
+        state_prev: (B, 1, 1, N)
+        """
+        # Step through the LRU
+        y_t, state_t = self.lru.step(x_t, state_prev)
+        
+        # Apply the nonlinearity and residual connection
+        out = self.nonlinear_block(y_t)
+        
+        return out + x_t, state_t
 
 
 # --------------------------------------------------------------------------- #
@@ -180,6 +242,40 @@ class LRUBlock(nn.Module):
 
         return y.transpose(-2, -1).squeeze(-2)                                                                 # B L 1 H
 
+
+    def step(self, u_t, x_prev):
+        """
+        Performs a single step of the LRU state space model.
+        
+        Args:
+            u_t: Input at current time step -> Shape: (B, 1, H)
+            x_prev: Hidden state from previous step -> Shape: (B, 1, 1, N)
+            
+        Returns:
+            y_t: Output at current time step -> Shape: (B, 1, H)
+            x_t: Updated hidden state -> Shape: (B, 1, 1, N)
+        """
+        u_t = u_t.unsqueeze(-2)                                                                     # B 1 1 H
+
+        # 1. Fetch A
+        A = torch.exp(-torch.exp(self.nu_log))                                                      # 1 1 1 N
+        
+        # 2. Compute B * u_t
+        # matmul(B, u) yields (B, 1, N, 1). Transposing yields (B, 1, 1, N) to match x_prev
+        Bu = torch.exp(self.gamma_log) * torch.matmul(self.B, u_t.transpose(-2, -1)).transpose(-2, -1) 
+
+        # 3. Update hidden state: x_t = A * x_{t-1} + B * u_t
+        x_t = A * x_prev + Bu                                                                       # B 1 1 N
+
+        # 4. Compute output: y_t = C * x_t + D * u_t
+        x_t_transposed = x_t.transpose(-2, -1)                                                      # B 1 N 1
+        y_t = torch.matmul(self.C, x_t_transposed)                                                  # B 1 H 1
+        y_t = y_t + self.D * u_t.transpose(-2, -1)                                                  # B 1 H 1
+
+        # 5. Clean up dimensions for output
+        y_out = y_t.transpose(-2, -1).squeeze(-2)                                                   # B 1 H
+        
+        return y_out, x_t
 
 
 
