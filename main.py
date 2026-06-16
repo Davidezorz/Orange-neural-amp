@@ -5,18 +5,19 @@ from torch.utils.data import DataLoader
 
 import pytorch_lightning as pl
 from lightning_model import LightningModel
-from lightning_model2 import LightningModel2
 
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 from preprocessing import *
 from utils import plotWaveforms, setupMatplotlib, numberOfparameters, getDevice
-from mamba2 import Mamba2
-from model import Model
 from data import AudioDataset
-from LSTM import SimpleAmpLSTM
-from BiquadsModel import BiquadsBlock, BiquadsModel
-from s4d import ModelS4D
+
+from models.StateSpaceModels import Model
+from models.mamba2 import Mamba2
+from models.LSTM import SimpleAmpLSTM
+from models.biquads_model import BiquadsBlock, BiquadsModel
+from models.s4d import ModelS4D
+from models.model_test import ModelTest, ModelTestMC
 
 import warnings
 
@@ -103,8 +104,9 @@ if __name__ == "__main__":
     print('main run')
     setupMatplotlib()
 
-    path_clean   = '.data/T3K-sweep-v3.wav'
-    path_distort = '.data/v3_0_0 Sparkle Combo Distort.wav'
+    path_data = ".data/"
+    path_clean   = path_data + 'T3K-sweep-v3.wav'
+    path_distort = path_data + 'v3_0_0 Sparkle Combo Distort.wav'
 
     y_clean, sampling_rate = load_audio(path_clean)
     y, sampling_rate       = load_audio(path_distort, sampling_rate, mono=True)
@@ -173,19 +175,22 @@ if __name__ == "__main__":
     B, T, d_model = 2, 128, d_model
 
     x = torch.rand(B, T, 1).to(device)
+    sr = _V3_DATA_INFO.rate
     # model = Model(H=d_model, N=d_state, D=5).to(device)
     # model = SimpleAmpLSTM(hidden_size=d_state).to(device)
     # model = BiquadsBlock(K=2, sampling_rate=_V3_DATA_INFO.rate).to(device); model.compute_coefficients()
-    model = BiquadsModel(S=10, K=12, sampling_rate=_V3_DATA_INFO.rate).to(device)
+    # model = BiquadsModel(S=8, K=4, sampling_rate=_V3_DATA_INFO.rate).to(device)
     # model = Model(H=d_model, N=d_state, D=7, input_channels=2).to(device) 
     # model = ModelS4D(N=12, H=12, D=4)
+    # model = ModelTest(S=8, K=4, sampling_rate=_V3_DATA_INFO.rate).to(device)
+    model = ModelTestMC(S=10, K=8, C=1, H=8, sampling_rate=sr).to(device)
     
     print('Model with: ', numberOfparameters(model), " parameters")
     # y = model(x)
     # print(y.shape) 
 
     file = ".weights/BiquadsS8K4"
-    # model.load_state_dict(torch.load(file, weights_only=True))
+    # model.load_state_dict(torch.load(file, weights_only=True), strict=False)
 
 
    # ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- ----- --
@@ -213,9 +218,9 @@ if __name__ == "__main__":
 
 
     # 2. Instantiate Datasets & Dataloaders
-    chunk_size = 2**13
+    chunk_size = 2**14 # 2**13
     warmup = 512   
-    max_epochs = 12*2
+    max_epochs = 12
     batch_size = 8
 
     #print(y_in_val.shape)
@@ -244,7 +249,7 @@ if __name__ == "__main__":
 
     
     
-    lightning_model = LightningModel(  # TODO: HERE should be LightningModel
+    lightning_model = LightningModel( 
         model          = model,
         learning_rate  = 8e-3,
         warmup         = warmup,
@@ -279,16 +284,7 @@ if __name__ == "__main__":
     lightning_model.to(device)
     lightning_model.eval()
     
-    """
-    checkpoint_path = ".weights/mamba2-epoch=29-val_loss=0.6456.ckpt"
 
-    lightning_model = LightningModel.load_from_checkpoint(
-        checkpoint_path,
-        model=model 
-    )
-    
-
-    """
     """
     losses = []
     for i, (y_in, y_out) in enumerate(val_loader):
@@ -316,16 +312,20 @@ if __name__ == "__main__":
     
     for i, (y_in, y_out) in enumerate(val_loader):
         y_in, y_out = y_in.to(device), y_out.to(device)
-        if i >= 5 : break
 
         y_pred = lightning_model.model(y_in.clone())
+        y_pred_np = (y_pred[0, :, 0]).detach().cpu().numpy()
 
-        print(lightning_model.esr_loss(y_pred, y_out))
+        store_audio(path_data + "last_run.wav",  
+                    y_pred_np, sampling_rate)
+        
+        print(f"val ESR: {lightning_model.esr_loss(y_pred, y_out)}")
 
         plotWaveforms(y_in   = (y_in[0, :, 0]).detach().cpu().numpy(), 
                       y_true = (y_out[0, :, 0]).detach().cpu().numpy(),
-                      y_pred = (y_pred[0, :, 0]).detach().cpu().numpy())
+                      y_pred = y_pred_np)
         plt.show()
+        break
 
     try:
         print()

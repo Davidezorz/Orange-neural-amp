@@ -230,4 +230,5 @@ class PScan(torch.autograd.Function):
 
         return Q.transpose(2, 1)[:, :L], grad_output.transpose(2, 1)[:, :L]
     
+    
 pscan = PScan.apply

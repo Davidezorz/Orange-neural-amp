@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mamba2 import Mamba2
+from models.mamba2 import Mamba2
 import math
 from mambapy.mamba import Mamba, MambaConfig
 # from mambapy.pscan import pscan
-from pscan import pscan
+from models.pscan import pscan
 
 import sys
 

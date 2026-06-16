@@ -7,9 +7,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mamba2 import Mamba2
+from models.mamba2 import Mamba2
 # from mambapy.pscan import pscan
-from pscan import pscan
+from models.pscan import pscan
 import math
 
 
@@ -34,7 +34,7 @@ class TanhApprox(nn.Module):
 
 
 class BiquadsModel(nn.Module):
-    
+
     def __init__(self, 
                  S:             int, 
                  K:             int, 
@@ -64,7 +64,7 @@ class BiquadsModel(nn.Module):
         self.train_mode = train_mode                                            # choose the training and
         self.eval_mode  = eval_mode                                             # evaluation computation
 
-        # self.delay_layer = ParametricDelay()                                  # present in the paper but not so useful
+        # self.delay_layer = ParametricDelay()                                  # present in the paper but not useful
 
         blocks = [BiquadsBlock(K=K, sampling_rate=sampling_rate) 
                   for _ in range(S)]
@@ -161,10 +161,6 @@ class BiquadsBlock(nn.Module):
         self.a_1 = None
         self.a_2 = None
 
-        # for gradient checks
-        self.Hw  = None
-        self.denominator = None
-
     
     def forward_fft(self, x):
         B, L, C = x.shape
@@ -180,10 +176,6 @@ class BiquadsBlock(nn.Module):
         # 3. Get frequency response (using the new n_fft size)
         Hw = self.calculate_transfer_function(self.b_0, self.b_1, self.b_2, 
                                               self.a_1, self.a_2, n_fft=n_fft)
-        
-        if self.training:
-            self.Hw = Hw
-            self.Hw.retain_grad()
         
         # 4. Multiply cascaded filters in Log-Space for ultimate stability
         Hw_safe = Hw + 1e-8
@@ -225,10 +217,6 @@ class BiquadsBlock(nn.Module):
         Hw = self.calculate_transfer_function(self.b_0, self.b_1, self.b_2, 
                                               self.a_1, self.a_2, n_fft=n_fft)
         
-        self.Hw = Hw
-        if self.training:
-            self.Hw.retain_grad()
-        
         # Multiply across the K cascaded filters
         H_cascade = torch.prod(Hw, dim=0)
         # H_cascade = torch.exp(torch.sum(torch.log(Hw + 1e-8), dim=0))
@@ -238,11 +226,6 @@ class BiquadsBlock(nn.Module):
 
         # 3. Apply filter in frequency domain
         x_processed = x_stft * H_cascade
-
-        # if torch.isnan(x_stft).any():       print("x_stft           CREATED NaNs!")
-        # if torch.isnan(Hw).any():           print("Hw               CREATED NaNs!")
-        # if torch.isnan(H_cascade).any():    print("H_cascade        CREATED NaNs!")
-        # if torch.isnan(x_processed).any():  print("x_processed      CREATED NaNs!")
 
         # 4. Inverse STFT
         # We must explicitly tell istft that center=True so it un-pads perfectly
@@ -277,12 +260,11 @@ class BiquadsBlock(nn.Module):
         return y[:, 2:, :]
     
 
-    def forward_pscan(self, x):        
+    def forward_pscan(self, x):    
         B, L, C = x.shape
         y = x.clone()
         
-        # 0. CAST TO DOUBLE PRECISION (float64)
-        # This prevents "Catastrophic Cancellation" when the roots get too close to 0
+        # 0. CAST TO COMPLEX (float32)
         a1 = self.a_1.squeeze(-1).to(torch.cfloat)
         a2 = self.a_2.squeeze(-1).to(torch.cfloat)
         b0 = self.b_0.squeeze(-1).to(torch.cfloat)
@@ -361,20 +343,7 @@ class BiquadsBlock(nn.Module):
         # 5. Divide the numerator array by the denominator array
         # This gives us the final complex frequency response H(w) for every bin!
         H_w = numerator / denominator                                           # K num_bins
-        if self.training:
-            self.denominator = denominator
-            self.denominator.retain_grad()
 
-        # if torch.isinf(numerator).any():    print("numerator        CREATED inf!")
-        # if torch.isinf(denominator).any():  print("denominator      CREATED inf!")
-        # if (torch.abs(denominator) < 1e-12).any():
-        #     print("denominator      near 0!")
-
-        # if torch.isnan(numerator).any():    print("numerator        CREATED NaNs!")
-        # if torch.isnan(denominator).any():  print("denominator      CREATED NaNs!")
-
-        # if torch.isinf(H_w).any():          print("H_w              CREATED inf!")
-        # if torch.isnan(H_w).any():          print("H_w              CREATED NaNs!")
         return H_w
 
 
@@ -408,51 +377,6 @@ class BiquadsBlock(nn.Module):
 
         self.a_1 = -2*torch.cos(w_0)  / a_0
         self.a_2 = (1 - alpha/A)      / a_0
-
-        # Could be safer
-        # self.a_1 = torch.clamp(self.a_1, min=(-0.99 - self.a_2), max=(self.a_2 + 0.99))
-        # self.a_2 = torch.clamp(self.a_2, min=-0.99, max=0.99)
-
-        # f_tresh = 30
-        # if (torch.abs(f) < f_tresh).any():
-        #     print(f"f                less then {f_tresh}!")
-
-        # if torch.isnan(self.f_raw ).any():  print("f_raw            CREATED NaNs!")
-        # if torch.isnan(f ).any():           print("f                CREATED NaNs!")
-        # if torch.isnan(Q ).any():           print("Q                CREATED NaNs!")
-
-        # if (torch.abs(alpha/A) < 1e-3).any():
-        #     print("alpha/A          near 0!")
-
-        # if (torch.abs(alpha) < 1e-3).any():
-        #     print("alpha            near 0!")
-
-        # if (torch.abs(A) < 1e-3).any():
-        #     print("A                near 0!")
-
-        # print(f"alpha/A         {str_arr(alpha/A)}")
-        # print(f"A               {str_arr(A)}")
-        # print(f"alpha           {str_arr(alpha)}")
-
-        # print(f"f               {str_arr(f)}")
-        # print(f"self.f_raw      {str_arr(self.f_raw)}")
-        # print(f"f_cumsum        {str_arr(f_cumsum)}")
-        # print(f"Q               {str_arr(Q)}")
-        # print(f"self.db_gain    {str_arr(self.db_gain)}")
-
-        # print(f"self.b_0        {str_arr(self.b_0)}")
-        # print(f"self.b_1        {str_arr(self.b_1)}")
-        # print(f"self.b_2        {str_arr(self.b_2)}")
-        # print(f"self.a_1        {str_arr(self.a_1)}")
-        # print(f"self.a_2        {str_arr(self.a_2)}")
-
-
-        if self.training:
-            self.b_0.retain_grad()
-            self.b_1.retain_grad()
-            self.b_2.retain_grad()
-            self.a_1.retain_grad()
-            self.a_2.retain_grad()
 
 
     def forward(self, x: torch.Tensor):
