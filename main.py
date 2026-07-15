@@ -22,77 +22,6 @@ from models.model_test import ModelTest, ModelTestMC
 import warnings
 
 
-def testBiquadModel(model, _V3_DATA_INFO, path_distort):
-    """function that test a BiquadsBlock"""
-    assert isinstance(model, BiquadsBlock), "Test work only on BiquadsBlock"
-    with torch.no_grad():
-        K=2
-        f1_des = 400                                    # Hz
-        f2_des = 10000                                   # Hz
-        f1 = f1_des/_V3_DATA_INFO.rate * K
-        f2 = f2_des/_V3_DATA_INFO.rate * K
-
-        print(f"f in: {[f1, f2-f1]}\n")
-        model.f_raw.copy_(torch.tensor([f1, f2-f1]))    # Targets f1_des Hz
-        model.Q_raw.copy_(torch.tensor([0.0, 0.0]))     # Targets Q = 0.5
-        model.db_gain.copy_(torch.tensor([-6.0, 6]))    # Targets +6.0 dB boost
-
-    # 3. Compute the coefficients manually before the first pass
-    model.compute_coefficients()
-
-    print(f"\nTargeting: 1000 Hz, +6dB, Q=0.5")
-    print(f"Calculated b0: {model.b_0}")
-    print(f"Calculated b1: {model.b_1}")
-    print(f"Calculated b2: {model.b_2}")
-    print(f"Calculated a1: {model.a_1}")
-    print(f"Calculated a2: {model.a_2}")
-    print("-" * 30, "\n")
-
-    
-    Hw = model.calculate_transfer_function(model.b_0, model.b_1, model.b_2, 
-                                           model.a_1, model.a_2)
-    
-    Hw_np = Hw.detach().cpu().numpy()
-
-    nyquist = _V3_DATA_INFO.rate / 2
-    x = np.linspace(0, nyquist , Hw_np.shape[-1])
-    plt.plot(x, np.abs(Hw_np[0]*Hw_np[1]))
-    # plt.ylim([-60, 6])
-    plt.xscale('log')  
-    plt.show()
-
-
-    y_test = torch.tensor(y_out_val).to(device)
-    y_test = y_test.transpose(-1, -2)[None, :, :]
-
-    print(f"y_test.shape:        {y_test.shape}")
-
-    model.train()
-    y_biquad = model(y_test)
-    print(f"y_biquad.shape:      {y_biquad.shape}")
-
-    model.eval()
-    y_biquad_eval = model(y_test)
-    print(f"y_biquad_eval.shape: {y_biquad_eval.shape}")
-
-
-    print(f"\nMSE: {F.mse_loss(y_biquad, y_biquad_eval)}\n")
-
-
-    
-    fig, ax = plt.subplots(figsize=(12, 7))
-    ax.plot(y_test[0, :, 0].detach().cpu().numpy(), color="#11FF11")
-    ax.plot(y_biquad[0, :, 0].detach().cpu().numpy(), color="#1111FF")
-    ax.plot(y_biquad_eval[0, :, 0].detach().cpu().numpy(), color="#FF1111")
-    plt.show()
-
-    print(torch.sum(torch.abs(y_biquad[0, :, 0]-y_test[0, :, 0])))
-
-
-    store_audio(path_distort[:-4] + "y_biquad.wav",  
-                y_biquad[0, :, 0].detach().cpu().numpy(), sampling_rate)
-
-
 
 
 
@@ -285,31 +214,10 @@ if __name__ == "__main__":
     lightning_model.eval()
     
 
-    """
-    losses = []
-    for i, (y_in, y_out) in enumerate(val_loader):
-        y_in, y_out = y_in.to(device), y_out.to(device)
 
-        y_pred = lightning_model.model(y_in)
-        loss = lightning_model.esr_loss(y_pred, y_out)
-        losses.append(loss.item())
-        if i == 5: 
-            for j , (y_in_b, y_out_b, y_pred_b) in enumerate(zip(y_in, y_out, y_pred)):
-                print(f"iteration {j} current loss: ", lightning_model.esr_loss(y_pred_b, y_out_b))
-                plotWaveforms(y_in   = (y_in_b[:, 0]).detach().cpu().numpy(), 
-                              y_true = (y_out_b[:, 0]).detach().cpu().numpy(), 
-                              y_pred = (y_pred_b[:, 0]).detach().cpu().numpy())
-                plt.show()
 
-    worst_batch = torch.argmax(torch.tensor(losses))
-    print()
-    print(f"worst batch {worst_batch}")
-    print(f"worst batch {torch.tensor(losses)[worst_batch]}")
-    print(f"val loss {sum(losses)/len(losses)}")
-    print()
-    """
-
-    
+    # store and show the first batch in the val_loader (it should contain only 
+    # one batch)
     for i, (y_in, y_out) in enumerate(val_loader):
         y_in, y_out = y_in.to(device), y_out.to(device)
 
@@ -327,6 +235,8 @@ if __name__ == "__main__":
         plt.show()
         break
 
+
+    # if we are using a biquad base model, we print the parameters.
     try:
         print()
         print(model.gains)
@@ -353,3 +263,4 @@ if __name__ == "__main__":
                   vlines_list=[blip_locations[0], blip_locations[0]+delay])
 
     """
+
